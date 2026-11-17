@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pump.fun Terminal — Phantom + Paper</title>
+<script src="https://unpkg.com/@solana/web3.js@1.98.0/lib/index.iife.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0a0a0f; color: #e8e8f0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    padding: 16px; font-size: 13px;
+  }
+  .container { max-width: 1000px; margin: 0 auto; }
+  .header {
+    display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;
+    background: #15151f; padding: 16px 20px; border-radius: 12px; margin-bottom: 12px;
+    border: 1px solid #2a2a3a;
+  }
+  .balance { font-size: 26px; font-weight: 700; }
+  .badge { background: #f59e0b22; color: #f59e0b; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+  .badge.real { background: #ef444422; color: #ef4444; }
+  .status { color: #22c55e; font-size: 12px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .card { background: #15151f; border: 1px solid #2a2a3a; border-radius: 12px; padding: 14px; }
+  .card h3 { font-size: 12px; color: #888; margin-bottom: 10px; }
+  .token-list, .trade-list { max-height: 340px; overflow-y: auto; }
+  .item { padding: 8px 0; border-bottom: 1px solid #222; display: flex; justify-content: space-between; align-items: center; font-size: 12px; gap: 8px; }
+  .symbol { font-weight: 700; }
+  .buy-btn { background: #22c55e; color: #000; border: none; padding: 4px 10px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 11px; }
+  .buy-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .log { background: #0f0f16; border: 1px solid #2a2a3a; border-radius: 12px; padding: 12px; margin-top: 16px; max-height: 180px; overflow-y: auto; font-family: monospace; font-size: 11px; }
+  .log-line { padding: 2px 0; }
+  .controls { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button { background: #fff; color: #000; border: none; padding: 8px 14px; border-radius: 8px; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: 0.5; }
+  .warn { color: #f59e0b; font-size: 11px; margin-top: 10px; line-height: 1.4; }
+  .danger { color: #ef4444; font-size: 12px; margin-top: 6px; }
+  input[type="number"] { background: #1a1a24; color: #fff; border: 1px solid #333; border-radius: 6px; padding: 6px 8px; width: 70px; }
+  .sell-btn { background: #ef4444; color: #fff; border: none; padding: 3px 8px; border-radius: 5px; font-size: 10px; cursor: pointer; }
+  .pnl-pos { color: #22c55e; }
+  .pnl-neg { color: #ef4444; }
+  label { font-size: 12px; color: #aaa; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div>
+      <div style="font-size:18px;font-weight:700;">Pump.fun Terminal</div>
+      <div class="status" id="status">Disconnected</div>
+    </div>
+    <div class="balance" id="balance">Paper: $10.00</div>
+    <div>
+      <span class="badge" id="modeBadge">PAPER</span>
+      <div style="margin-top:6px;font-size:11px;color:#888;" id="walletAddr">Not connected</div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>LIVE NEW TOKENS</h3>
+      <div class="token-list" id="tokenList"></div>
+    </div>
+    <div class="card">
+      <h3>TRADES / ACTIONS</h3>
+      <div class="trade-list" id="tradeList"></div>
+    </div>
+  </div>
+
+  <div class="log" id="log"></div>
+
+  <div class="controls">
+    <button id="connectBtn">Connect Phantom</button>
+    <button id="paperToggle" style="background:#f59e0b;color:#000;">Switch to Real Mode</button>
+    <label>Buy size ($): <input type="number" id="buyUsd" value="1" step="0.5" min="0.5" max="10"></label>
+    <label>SL %: <input type="number" id="slPct" value="30" step="5" min="5" max="80"></label>
+    <label>TP %: <input type="number" id="tpPct" value="100" step="10" min="10" max="500"></label>
+    <label>SOL $: <input type="number" id="solPrice" value="180" step="1" min="50" max="500"></label>
+    <button id="pauseBtn">Pause Feed</button>
+    <button id="exportBtn">Export CSV</button>
+    <button id="clearBtn">Clear Log</button>
+  </div>
+
+  <div class="warn">
+    PAPER mode by default — no real trades.<br>
+    Real mode uses PumpPortal Local API + Phantom signing. Your private key never leaves Phantom.<br>
+    Max buy is the USD amount above (default $1). Converted to SOL using the SOL price field.<br>
+    Paper mode tracks a $10 virtual balance with simulated SL/TP. Real mode requires Phantom confirmation for every buy and sell.
+    Pump.fun tokens are extremely high risk. Most go to zero. This is for testing only.
+  </div>
+  <div class="danger" id="realWarn" style="display:none;">
+    REAL TRADING ENABLED — Confirm every buy carefully. Losses can be total.
+  </div>
+</div>
+
+<script>
+const { Connection, VersionedTransaction, PublicKey, LAMPORTS_PER_SOL } = solanaWeb3;
+const RPC = "https://api.mainnet-beta.solana.com";
+const connection = new Connection(RPC, "confirmed");
+
+let wallet = null;
+let publicKey = null;
+let realMode = false;
+let paused = false;
+let seen = new Set();
+let tradeLog = []; // structured records for CSV export
+let paperBalance = 10.0; // USD
+let paperPositions = {}; // mint -> {symbol, entryUsd, sizeUsd, entryTime}
+
+function getBuySol() {
+  const usd = parseFloat(el("buyUsd").value) || 1;
+  const solPrice = parseFloat(el("solPrice").value) || 180;
+  return Math.min(usd / solPrice, 0.1); // hard cap 0.1 SOL
+}
+
+function updatePaperBalance() {
+  if (!realMode) el("balance").textContent = `Paper: $${paperBalance.toFixed(2)}`;
+}
+
+const el = id => document.getElementById(id);
+const log = msg => {
+  const line = document.createElement("div");
+  line.className = "log-line";
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el("log").prepend(line);
+  if (el("log").children.length > 100) el("log").lastChild.remove();
+};
+
+async function updateBalance() {
+  if (realMode && publicKey) {
+    try {
+      const bal = await connection.getBalance(publicKey);
+      el("balance").textContent = (bal / LAMPORTS_PER_SOL).toFixed(4) + " SOL";
+    } catch (e) {
+      el("balance").textContent = "error";
+    }
+  } else {
+    updatePaperBalance();
+  }
+}
+
+async function connectPhantom() {
+  if (!window.solana || !window.solana.isPhantom) {
+    alert("Phantom wallet not found. Install the Phantom browser extension.");
+    return;
+  }
+  try {
+    const resp = await window.solana.connect();
+    publicKey = new PublicKey(resp.publicKey.toString());
+    wallet = window.solana;
+    el("walletAddr").textContent = publicKey.toBase58().slice(0, 6) + "…" + publicKey.toBase58().slice(-4);
+    el("status").textContent = "Wallet connected";
+    el("connectBtn").textContent = "Connected";
+    el("connectBtn").disabled = true;
+    log("Phantom connected: " + publicKey.toBase58());
+    updateBalance();
+    setInterval(updateBalance, 15000);
+  } catch (e) {
+    log("Connect failed: " + e.message);
+  }
+}
+
+async function realBuy(mint, symbol) {
+  if (!publicKey || !wallet) { log("Connect Phantom first"); return; }
+  const buySol = getBuySol();
+  const usd = parseFloat(el("buyUsd").value) || 1;
+
+  if (!confirm(`REAL BUY ${symbol || mint.slice(0,8)} for ~$${usd} (${buySol.toFixed(4)} SOL)?\nThis will spend real funds.`)) return;
+
+  log(`Building real buy for $${symbol || mint.slice(0,6)} (~$${usd}) …`);
+  try {
+    const res = await fetch("https://pumpportal.fun/api/trade-local", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        publicKey: publicKey.toBase58(),
+        action: "buy",
+        mint,
+        amount: buySol,
+        denominatedInSol: "true",
+        slippage: 15,
+        priorityFee: 0.0001,
+        pool: "pump"
+      })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const buf = await res.arrayBuffer();
+    const tx = VersionedTransaction.deserialize(new Uint8Array(buf));
+
+    const signed = await wallet.signTransaction(tx);
+    const sig = await connection.sendTransaction(signed, { skipPreflight: false, maxRetries: 2 });
+    log(`REAL BUY sent: https://solscan.io/tx/${sig}`);
+    addTradeItem(symbol || mint.slice(0,8), "REAL BUY", sig, mint);
+    setTimeout(updateBalance, 4000);
+  } catch (e) {
+    log("Buy failed: " + e.message);
+  }
+}
+
+async function realSell(mint, symbol) {
+  if (!publicKey || !wallet) { log("Connect Phantom first"); return; }
+  if (!confirm(`REAL SELL all of ${symbol || mint.slice(0,8)}?\nThis will send a real sell transaction.`)) return;
+
+  log(`Building real sell for $${symbol || mint.slice(0,6)} …`);
+  try {
+    const res = await fetch("https://pumpportal.fun/api/trade-local", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        publicKey: publicKey.toBase58(),
+        action: "sell",
+        mint,
+        amount: "100%",
+        denominatedInSol: "false",
+        slippage: 15,
+        priorityFee: 0.0001,
+        pool: "pump"
+      })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const buf = await res.arrayBuffer();
+    const tx = VersionedTransaction.deserialize(new Uint8Array(buf));
+
+    const signed = await wallet.signTransaction(tx);
+    const sig = await connection.sendTransaction(signed, { skipPreflight: false, maxRetries: 2 });
+    log(`REAL SELL sent: https://solscan.io/tx/${sig}`);
+    addTradeItem(symbol || mint.slice(0,8), "REAL SELL", sig, mint);
+    setTimeout(updateBalance, 4000);
+  } catch (e) {
+    log("Sell failed: " + e.message);
+  }
+}
+
+function addTradeItem(symbol, action, extra = "", mint = "") {
+  const timestamp = new Date().toISOString();
+  const record = {
+    timestamp,
+    symbol,
+    action,
+    mint,
+    extra,
+    mode: realMode ? "REAL" : "PAPER"
+  };
+  tradeLog.push(record);
+
+  const item = document.createElement("div");
+  item.className = "item";
+  const sellBtn = (realMode && mint && action.includes("BUY"))
+    ? `<button class="sell-btn" data-mint="${mint}" data-symbol="${symbol}">Sell</button>`
+    : "";
+  item.innerHTML = `<span class="symbol">$${symbol}</span> <span>${action}</span> <span style="color:#888;font-size:10px;">${extra.slice(0,20)}</span> ${sellBtn}`;
+  el("tradeList").prepend(item);
+  if (el("tradeList").children.length > 40) el("tradeList").lastChild.remove();
+
+  const btn = item.querySelector(".sell-btn");
+  if (btn) btn.onclick = () => realSell(btn.dataset.mint, btn.dataset.symbol);
+}
+
+function paperBuy(mint, symbol) {
+  const usd = parseFloat(el("buyUsd").value) || 1;
+  if (paperBalance < usd) { log("Insufficient paper balance"); return; }
+  paperBalance -= usd;
+  paperPositions[mint] = {
+    symbol,
+    entryUsd: usd,
+    sizeUsd: usd,
+    entryTime: Date.now()
+  };
+  updatePaperBalance();
+  log(`PAPER BUY $${symbol} for $${usd}`);
+  addTradeItem(symbol, "PAPER BUY", `$${usd}`, mint);
+  // simple random simulation of SL/TP after a few seconds
+  setTimeout(() => simulateExit(mint), 8000 + Math.random() * 7000);
+}
+
+function simulateExit(mint) {
+  const pos = paperPositions[mint];
+  if (!pos) return;
+  const sl = parseFloat(el("slPct").value) || 30;
+  const tp = parseFloat(el("tpPct").value) || 100;
+  const r = Math.random();
+  let pnlPct, reason;
+  if (r < 0.45) { pnlPct = -sl; reason = "SL"; }
+  else if (r < 0.75) { pnlPct = tp; reason = "TP"; }
+  else { pnlPct = (Math.random() * 40 - 10); reason = "manual"; }
+  const pnlUsd = pos.sizeUsd * (pnlPct / 100);
+  paperBalance += pos.sizeUsd + pnlUsd;
+  delete paperPositions[mint];
+  updatePaperBalance();
+  const sign = pnlUsd >= 0 ? "+" : "";
+  log(`PAPER ${reason} $${pos.symbol} ${sign}$${pnlUsd.toFixed(2)} (${pnlPct.toFixed(0)}%)`);
+  addTradeItem(pos.symbol, `PAPER ${reason}`, `${sign}$${pnlUsd.toFixed(2)}`, mint);
+}
+
+function onNewToken(token) {
+  if (paused) return;
+  const mint = token.mint || token.address;
+  if (!mint || seen.has(mint)) return;
+  seen.add(mint);
+
+  const symbol = token.symbol || "?";
+  const name = token.name || "";
+
+  const item = document.createElement("div");
+  item.className = "item";
+  item.innerHTML = `
+    <span class="symbol">$${symbol}</span>
+    <span style="flex:1;overflow:hidden;text-overflow:ellipsis;">${name}</span>
+    <button class="buy-btn" data-mint="${mint}" data-symbol="${symbol}">Buy</button>
+  `;
+  el("tokenList").prepend(item);
+  if (el("tokenList").children.length > 50) el("tokenList").lastChild.remove();
+
+  item.querySelector(".buy-btn").onclick = (e) => {
+    const m = e.target.dataset.mint;
+    const s = e.target.dataset.symbol;
+    if (realMode) realBuy(m, s);
+    else paperBuy(m, s);
+  };
+
+  log(`New token: $${symbol} ${name}`);
+}
+
+function connectFeed() {
+  const ws = new WebSocket("wss://pumpportal.fun/api/data");
+  ws.onopen = () => {
+    el("status").textContent = realMode ? "LIVE REAL" : "LIVE PAPER";
+    log("Connected to new-token feed");
+    ws.send(JSON.stringify({ method: "subscribeNewToken" }));
+  };
+  ws.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      if (data.mint || data.symbol) onNewToken(data);
+    } catch {}
+  };
+  ws.onclose = () => setTimeout(connectFeed, 3000);
+  ws.onerror = () => log("Feed error");
+}
+
+el("connectBtn").onclick = connectPhantom;
+
+el("paperToggle").onclick = () => {
+  realMode = !realMode;
+  el("modeBadge").textContent = realMode ? "REAL" : "PAPER";
+  el("modeBadge").className = realMode ? "badge real" : "badge";
+  el("paperToggle").textContent = realMode ? "Switch to Paper" : "Switch to Real Mode";
+  el("realWarn").style.display = realMode ? "block" : "none";
+  el("status").textContent = realMode ? "LIVE REAL" : "LIVE PAPER";
+  log(realMode ? "REAL MODE ON — confirm every buy/sell" : "Paper mode");
+  updateBalance();
+};
+
+el("pauseBtn").onclick = () => {
+  paused = !paused;
+  el("pauseBtn").textContent = paused ? "Resume Feed" : "Pause Feed";
+  log(paused ? "Feed paused" : "Feed resumed");
+};
+
+el("clearBtn").onclick = () => { el("log").innerHTML = ""; };
+
+function exportCSV() {
+  if (tradeLog.length === 0) {
+    alert("No trades to export yet.");
+    return;
+  }
+  const headers = ["timestamp", "mode", "action", "symbol", "mint", "extra"];
+  const rows = tradeLog.map(r =>
+    headers.map(h => `"${String(r[h] || "").replace(/"/g, '""')}"`).join(",")
+  );
+  const csv = [headers.join(","), ...rows].join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `pump_trades_${new Date().toISOString().slice(0,19).replace(/:/g,"-")}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  log(`Exported ${tradeLog.length} trades to CSV`);
+}
+
+el("exportBtn").onclick = exportCSV;
+
+updatePaperBalance();
+connectFeed();
+</script>
+</body>
+</html>
